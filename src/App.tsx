@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Link,
@@ -18,13 +18,21 @@ import {
   ChevronRight,
   ClipboardCheck,
   Copy,
+  Crop,
   Eye,
   FileCheck2,
+  FileMinus2,
+  FilePlus2,
   FileText,
   Highlighter,
+  History,
   Layers3,
   Menu,
+  PackageOpen,
+  PackagePlus,
   PanelLeftClose,
+  RotateCcw,
+  RotateCw,
   ScanSearch,
   ShieldCheck,
   Stamp,
@@ -35,7 +43,9 @@ import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Badge, Button, Card, Dialog, Tabs, X } from './components/ui';
-import { useDisclosureStore, type DisclosureRecord } from './store';
+import { FULL_CROP } from './annotation';
+import { makePresetBatches } from './importPresets';
+import { useDisclosureStore, type CropBox, type DisclosureRecord, type ImportOutcome, type Rotation } from './store';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -198,7 +208,21 @@ function useDemoPdf() {
   return bytes;
 }
 
-function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number; redacted?: boolean; onDraw?: (region: { x: number; y: number; width: number; height: number }) => void }) {
+function PdfPage({
+  pageNumber,
+  rotation = 0,
+  crop = FULL_CROP,
+  redacted = false,
+  onDraw,
+  children
+}: {
+  pageNumber: number;
+  rotation?: Rotation;
+  crop?: CropBox;
+  redacted?: boolean;
+  onDraw?: (region: { x: number; y: number; width: number; height: number }) => void;
+  children?: ReactNode;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bytes = useDemoPdf();
   const [drawing, setDrawing] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -209,21 +233,20 @@ function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number;
     const render = async () => {
       task = pdfjs.getDocument({ data: bytes.slice(0) });
       const pdf = await task.promise;
+      if (pageNumber > pdf.numPages) return; // 新插入的页没有源内容，留白
       const page = await pdf.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 1.25 });
+      const viewport = page.getViewport({ scale: 1.25, rotation });
       const canvas = canvasRef.current!;
       const ratio = window.devicePixelRatio || 1;
       canvas.width = viewport.width * ratio;
       canvas.height = viewport.height * ratio;
-      canvas.style.width = '100%';
-      canvas.style.aspectRatio = `${viewport.width}/${viewport.height}`;
       const context = canvas.getContext('2d')!;
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       await page.render({ canvas, canvasContext: context, viewport }).promise;
     };
     render().catch(console.error);
     return () => { task?.destroy(); };
-  }, [bytes, pageNumber]);
+  }, [bytes, pageNumber, rotation]);
 
   const pointerDown = (event: React.PointerEvent) => {
     if (!onDraw) return;
@@ -244,26 +267,62 @@ function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number;
     if (drawing && onDraw && drawing.width > 0.015 && drawing.height > 0.01) onDraw(drawing);
     setDrawing(null);
   };
+  // 示例页 612x792；旋转 90/270 时宽高互换，再按裁边比例得出可视窗口
+  const base = rotation % 180 === 0 ? { w: 612, h: 792 } : { w: 792, h: 612 };
+  const aspect = (base.w * crop.width) / (base.h * crop.height);
   return (
-    <div className={`pdf-page ${onDraw ? 'drawable' : ''}`} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}>
-      <canvas ref={canvasRef} />
+    <div
+      className={`pdf-page ${onDraw ? 'drawable' : ''}`}
+      style={{ aspectRatio: `${aspect}` }}
+      onPointerDown={pointerDown}
+      onPointerMove={pointerMove}
+      onPointerUp={pointerUp}
+    >
+      <div
+        className="crop-inner"
+        style={{
+          left: `${(-crop.x / crop.width) * 100}%`,
+          top: `${(-crop.y / crop.height) * 100}%`,
+          width: `${100 / crop.width}%`,
+          height: `${100 / crop.height}%`
+        }}
+      >
+        <canvas ref={canvasRef} />
+      </div>
       {redacted && <div className="page-redaction-demo"><span>已发布区域掩码</span></div>}
+      {children}
       {drawing && <i className="drawing-region" style={{ left: `${drawing.x * 100}%`, top: `${drawing.y * 100}%`, width: `${drawing.width * 100}%`, height: `${drawing.height * 100}%` }} />}
     </div>
   );
 }
 
+const CROP_PRESET: CropBox = { x: 0.06, y: 0.05, width: 0.88, height: 0.9 };
+
+const redactionStatusLabel = { draft: '草稿', confirmed: '已确认', pending: '待复核' } as const;
+const redactionStatusTone = { draft: 'amber', confirmed: 'green', pending: 'red' } as const;
+
 function ReviewPage() {
   const { documentId } = useParams({ from: '/review/$documentId' });
   const navigate = useNavigate();
-  const { documents, activePage, redactionMode, activeRedactionId } = useDisclosureStore();
   const store = useDisclosureStore();
+  const { documents, activePage, redactionMode, activeRedactionId } = store;
   const doc = documents.find((item) => item.id === documentId) ?? documents[0];
-  const pageRegions = doc.redactions.filter((item) => item.page === activePage);
+  const safePage = Math.min(activePage, doc.pageList.length);
+  const page = doc.pageList[safePage - 1];
+  const pageRegions = doc.redactions.filter((item) => item.pageId === page.id);
+  const orphaned = doc.redactions.filter((item) => !doc.pageList.some((p) => p.id === item.pageId));
   const active = doc.redactions.find((item) => item.id === activeRedactionId);
+  const activeOrphaned = active ? !doc.pageList.some((p) => p.id === active.pageId) : false;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reason, setReason] = useState('商业秘密');
   const [privilege, setPrivilege] = useState('合同保密');
+  const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
+  const presets = makePresetBatches(doc.id, doc.pageList.length);
+  const crop = page.geometry.crop;
+  const cropped = crop.x > 0 || crop.y > 0 || crop.width < 1 || crop.height < 1;
+  const unconfirmed = doc.redactions.filter((item) => item.status !== 'confirmed').length;
+  const effectiveCount = doc.conclusions.filter((c) => c.status === 'effective').length;
+  const invalidatedCount = doc.conclusions.length - effectiveCount;
   return (
     <div className="page review-page">
       <header className="review-header">
@@ -280,53 +339,132 @@ function ReviewPage() {
       </header>
       <div className="review-layout">
         <aside className="page-thumbs">
-          <div className="side-label">页级预览 <span>{doc.pages} 页</span></div>
-          {[1, 2, 3].map((page) => (
-            <button key={page} className={activePage === page ? 'active' : ''} onClick={() => store.setPage(page)}>
-              <div className="mini-page"><span>{page}</span><i style={{ width: `${45 + page * 9}%` }} /><i style={{ width: `${70 - page * 5}%` }} /><i style={{ width: `${55 + page * 4}%` }} /></div>
-              <small>第 {page} 页</small>
-            </button>
-          ))}
+          <div className="side-label">页级预览 <span>{doc.pageList.length} 页</span></div>
+          {doc.pageList.map((p) => {
+            const count = doc.redactions.filter((r) => r.pageId === p.id).length;
+            return (
+              <button key={p.id} className={safePage === p.pageNumber ? 'active' : ''} onClick={() => store.setPage(p.pageNumber)}>
+                <div className="mini-page"><span>{p.pageNumber}</span><i style={{ width: `${45 + (p.pageNumber % 3) * 9}%` }} /><i style={{ width: `${70 - (p.pageNumber % 3) * 5}%` }} /><i style={{ width: `${55 + (p.pageNumber % 3) * 4}%` }} /></div>
+                <small>
+                  第 {p.pageNumber} 页
+                  {p.geometry.rotation !== 0 ? ` · ${p.geometry.rotation}°` : ''}
+                  {count > 0 ? ` · ${count} 区` : ''}
+                </small>
+              </button>
+            );
+          })}
         </aside>
         <section className="viewer-column">
           <div className="viewer-toolbar">
-            <div><button onClick={() => store.setPage(Math.max(1, activePage - 1))} disabled={activePage === 1}><ChevronLeft size={16} /></button><strong>{activePage} / {doc.pages}</strong><button onClick={() => store.setPage(Math.min(doc.pages, activePage + 1))} disabled={activePage === doc.pages}><ChevronRight size={16} /></button></div>
+            <div><button onClick={() => store.setPage(Math.max(1, safePage - 1))} disabled={safePage === 1}><ChevronLeft size={16} /></button><strong>{safePage} / {doc.pageList.length}</strong><button onClick={() => store.setPage(Math.min(doc.pageList.length, safePage + 1))} disabled={safePage === doc.pageList.length}><ChevronRight size={16} /></button></div>
             <span>125%</span>
             <span>原页 · 掩码叠加</span>
           </div>
+          <div className="geometry-bar">
+            <span className="geom-info">几何 v{page.geometryVersion} · 旋转 {page.geometry.rotation}° · {cropped ? '已裁边' : '未裁边'}</span>
+            <div className="geom-actions">
+              <button onClick={() => store.rotatePage(page.id)} title="顺时针旋转 90°，原复核失效并重算坐标"><RotateCw size={14} /> 旋转90°</button>
+              <button onClick={() => store.setPageCrop(page.id, cropped ? null : CROP_PRESET)} title="切换裁边，原复核失效并重算坐标"><Crop size={14} /> {cropped ? '清除裁边' : '裁边预设'}</button>
+              <button onClick={() => store.insertPageAfter(safePage)} title="在本页后插入一页，后续页顺延"><FilePlus2 size={14} /> 在后插页</button>
+              <button onClick={() => store.removePage(page.id)} disabled={doc.pageList.length <= 1} title="移除本页，区域保留待处理"><FileMinus2 size={14} /> 删除本页</button>
+            </div>
+          </div>
           <div className="pdf-stage">
             <PdfPage
-              pageNumber={activePage}
-              onDraw={redactionMode ? (region) => store.addRedaction({ ...region, page: activePage, reason, privilege }) : undefined}
-            />
-            {pageRegions.map((region) => (
-              <button
-                key={region.id}
-                className={`redaction-region ${region.status} ${activeRedactionId === region.id ? 'selected' : ''}`}
-                style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }}
-                onClick={() => store.selectRedaction(region.id)}
-                title={`${region.reason} / ${region.privilege}`}
-              />
-            ))}
+              pageNumber={safePage}
+              rotation={page.geometry.rotation}
+              crop={crop}
+              onDraw={redactionMode ? (region) => store.addRedaction({ ...region, page: safePage, reason, privilege }) : undefined}
+            >
+              {pageRegions.map((region) => (
+                <button
+                  key={region.id}
+                  className={`redaction-region ${region.status} ${activeRedactionId === region.id ? 'selected' : ''}`}
+                  style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => store.selectRedaction(region.id)}
+                  title={`${region.reason} / ${region.privilege}`}
+                />
+              ))}
+            </PdfPage>
           </div>
         </section>
         <aside className="inspector">
           <div className="side-label">区域属性</div>
           {active ? (
             <>
-              <div className="inspector-title"><strong>{active.reason}</strong><Badge tone={active.status === 'confirmed' ? 'green' : 'amber'}>{active.status === 'confirmed' ? '已确认' : '草稿'}</Badge></div>
+              <div className="inspector-title"><strong>{active.reason}</strong><Badge tone={redactionStatusTone[active.status]}>{redactionStatusLabel[active.status]}</Badge></div>
               <label>保密级别<select value={doc.classification} onChange={(event) => store.updateClassification(event.target.value as DisclosureRecord['classification'])}><option>内部</option><option>机密</option><option>严格机密</option></select></label>
               <label>去密原因<input value={active.reason} readOnly /></label>
               <label>特权标签<input value={active.privilege} readOnly /></label>
               <label>责任人员<input value={doc.owner} readOnly /></label>
               <div className="coordinate-grid"><div><span>X</span><b>{Math.round(active.x * 100)}%</b></div><div><span>Y</span><b>{Math.round(active.y * 100)}%</b></div><div><span>宽</span><b>{Math.round(active.width * 100)}%</b></div><div><span>高</span><b>{Math.round(active.height * 100)}%</b></div></div>
-              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed'}><Check size={15} /> 确认此区域</Button>
+              <div className="region-meta">
+                <div><span>页号</span><b>第 {active.page} 页{activeOrphaned ? '（已移除）' : ''}</b></div>
+                <div><span>旋转角</span><b>{active.rotation}°</b></div>
+                <div><span>来源批次</span><b>{active.sourceBatch}</b></div>
+                <div><span>几何版本</span><b>{activeOrphaned ? '—' : `v${doc.pageList.find((p) => p.id === active.pageId)?.geometryVersion ?? 1}`}</b></div>
+              </div>
+              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed' || activeOrphaned}>
+                <Check size={15} /> {active.status === 'pending' ? '重新确认（原复核已失效）' : active.status === 'confirmed' ? '已确认' : '确认此区域'}
+              </Button>
+              {activeOrphaned && <p className="muted">所在页已移除，区域保留待处理，不会落到其他页。</p>}
               <Button variant="outline"><Copy size={15} /> 批量复制到同类页</Button>
             </>
           ) : <p className="muted">在文档页面上选择一个去密区域查看属性。</p>}
+          {orphaned.length > 0 && (
+            <div className="orphan-note"><AlertTriangle size={16} /><span>{orphaned.length} 个区域所在页已移除，保留在原页记录待处理，未改挂到其他页。</span></div>
+          )}
           <div className="rule-note"><AlertTriangle size={16} /><span>发布版本不得包含原始文本层或图片残片。</span></div>
         </aside>
       </div>
+      <section className="records-row">
+        <Card className="imports-card">
+          <div className="card-title"><PackageOpen size={17} /><strong>导入批次</strong><span>先到批次生效 · 同批复传沿用首次结果</span></div>
+          <div className="preset-row">
+            {presets.map((batch) => (
+              <Button key={batch.batchId} variant="outline" onClick={() => setOutcome(store.importBatch(batch))}><PackagePlus size={14} /> 提交 {batch.batchId}</Button>
+            ))}
+          </div>
+          {outcome && <p className={`import-outcome ${outcome.kind}`}>{outcome.message}</p>}
+          {doc.imports.order.length === 0 && doc.imports.conflicts.length === 0 && <p className="muted">尚未接收导入包。外聘复核员导出的区域包（含旋转角与裁边）在此提交合并。</p>}
+          {doc.imports.order.map((id) => {
+            const record = doc.imports.batches[id];
+            return (
+              <div className="ledger-row" key={id}>
+                <div><strong>{record.batchId}</strong><span>{record.batch.submittedBy} · {record.receivedAt}</span></div>
+                <Badge tone={record.status === 'merged' ? 'green' : 'red'}>{record.status === 'merged' ? '已合并' : '合并中断'}</Badge>
+                <span className="ledger-detail">{record.summary} · 已完成页 [{record.completedPages.join(', ') || '无'}]</span>
+                {record.status === 'failed' && <Button variant="outline" onClick={() => setOutcome(store.resumeImport(id))}><RotateCcw size={14} /> 从断点恢复</Button>}
+              </div>
+            );
+          })}
+          {doc.imports.conflicts.map((conflict) => (
+            <div className="ledger-row conflict" key={conflict.batch.batchId}>
+              <div><strong>{conflict.batch.batchId}</strong><span>{conflict.batch.submittedBy} · {conflict.receivedAt}</span></div>
+              <Badge tone="amber">冲突待处理</Badge>
+              <span className="ledger-detail">{conflict.reason}</span>
+              <div className="ledger-actions">
+                <Button variant="outline" onClick={() => setOutcome(store.applyConflict(conflict.batch.batchId))}>应用</Button>
+                <Button variant="ghost" onClick={() => store.discardConflict(conflict.batch.batchId)}>放弃</Button>
+              </div>
+            </div>
+          ))}
+        </Card>
+        <Card className="conclusions-card">
+          <div className="card-title"><History size={17} /><strong>复核结论记录</strong><span>{effectiveCount} 有效 · {invalidatedCount} 已失效</span></div>
+          {doc.conclusions.length === 0 && <p className="muted">尚无复核结论。</p>}
+          {[...doc.conclusions].reverse().map((conclusion) => (
+            <div className={`conclusion-row ${conclusion.status}`} key={conclusion.id}>
+              <Badge tone={conclusion.status === 'effective' ? 'green' : 'neutral'}>{conclusion.status === 'effective' ? '有效' : '已失效'}</Badge>
+              <div>
+                <strong>{conclusion.redactionId} · 第 {conclusion.pageNumber} 页 · 几何 v{conclusion.geometryVersion}</strong>
+                <span>{conclusion.reviewer} · {conclusion.decidedAt} · {conclusion.note}</span>
+              </div>
+            </div>
+          ))}
+        </Card>
+      </section>
       <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -334,9 +472,9 @@ function ReviewPage() {
             <Dialog.Title>发布前校验</Dialog.Title>
             <Dialog.Description>系统将核对原始页与发布页的一致性，并检查元数据残留。</Dialog.Description>
             <div className="dialog-checks">
-              <p><Check /> {doc.redactions.length} 个去密区域已定位</p>
+              <p><Check /> {doc.redactions.length} 个去密区域已定位（含页号 / 旋转角 / 来源批次）</p>
               <p><Check /> 文档版本与操作者记录完整</p>
-              <p className={doc.redactions.some((item) => item.status === 'draft') ? 'failed' : ''}><AlertTriangle /> {doc.redactions.some((item) => item.status === 'draft') ? '仍有未确认区域' : '所有区域已确认'}</p>
+              <p className={unconfirmed > 0 ? 'failed' : ''}><AlertTriangle /> {unconfirmed > 0 ? `仍有 ${unconfirmed} 个未确认或待复核区域` : '所有区域已确认'}</p>
             </div>
             <Dialog.Close asChild><Button>返回检查 <X size={15} /></Button></Dialog.Close>
           </Dialog.Content>
@@ -350,6 +488,9 @@ function QualityPage() {
   const { documents } = useDisclosureStore();
   const store = useDisclosureStore();
   const doc = documents[1];
+  const confirmedCount = doc.redactions.filter((item) => item.status === 'confirmed').length;
+  const pendingCount = doc.redactions.filter((item) => item.status === 'pending').length;
+  const draftCount = doc.redactions.filter((item) => item.status === 'draft').length;
   const checks = [
     { id: 'forbidden-terms', label: '全文禁词与姓名复核', detail: '扫描原始页和发布页文本层' },
     { id: 'page-number', label: '页序与页码连续性', detail: '检查拆页、合并及漏页情况' },
@@ -369,7 +510,7 @@ function QualityPage() {
       </div>
       <div className="quality-bottom">
         <Card className="checks-card"><div className="card-title"><ClipboardCheck size={17} /><strong>发布前校验项</strong></div>{checks.map((check) => <button className="check-row" key={check.id} onClick={() => store.toggleReviewCheck(check.id)}><span className={store.reviewChecks[check.id] ? 'checked' : ''}>{store.reviewChecks[check.id] && <Check size={13} />}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></button>)}</Card>
-        <Card className="decision-card"><div className="card-title"><ShieldCheck size={17} /><strong>复核结论</strong></div><p>本批次共有 <b>{doc.redactions.length}</b> 个去密区域，其中已确认 {doc.redactions.filter((item) => item.status === 'confirmed').length} 个。</p><label><input type="checkbox" checked={store.metadataCleaned} onChange={store.toggleMetadata} /> 已确认元数据清理</label><div className="decision-actions"><Button variant="outline"><ArrowLeft size={15} /> 退回补件</Button><Button disabled={!store.metadataCleaned || Object.values(store.reviewChecks).some((value) => !value)} onClick={store.markReady}><Check size={15} /> 通过并标记可发布</Button></div></Card>
+        <Card className="decision-card"><div className="card-title"><ShieldCheck size={17} /><strong>复核结论</strong></div><p>本批次共有 <b>{doc.redactions.length}</b> 个去密区域，已确认 <b>{confirmedCount}</b> 个{pendingCount > 0 ? <>，<b className="warning-text">{pendingCount}</b> 个待复核</> : ''}{draftCount > 0 ? `，${draftCount} 个草稿` : ''}。</p><label><input type="checkbox" checked={store.metadataCleaned} onChange={store.toggleMetadata} /> 已确认元数据清理</label><div className="decision-actions"><Button variant="outline"><ArrowLeft size={15} /> 退回补件</Button><Button disabled={!store.metadataCleaned || Object.values(store.reviewChecks).some((value) => !value) || pendingCount > 0 || draftCount > 0} onClick={store.markReady}><Check size={15} /> 通过并标记可发布</Button></div></Card>
       </div>
     </div>
   );
