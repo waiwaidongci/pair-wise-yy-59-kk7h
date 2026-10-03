@@ -22,20 +22,25 @@ import {
   FileCheck2,
   FileText,
   Highlighter,
+  History,
   Layers3,
   Menu,
-  PanelLeftClose,
+  Plus,
+  RotateCw,
   ScanSearch,
+  Scissors,
   ShieldCheck,
   Stamp,
   Tags,
+  Trash2,
   UploadCloud
 } from 'lucide-react';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Badge, Button, Card, Dialog, Tabs, X } from './components/ui';
-import { useDisclosureStore, type DisclosureRecord } from './store';
+import { useDisclosureStore, type BatchRecord, type DisclosureRecord } from './store';
+import { FULL_CROP } from './annotation';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -164,10 +169,10 @@ function useDemoPdf() {
     let alive = true;
     PDFDocument.create().then(async (pdf) => {
       const font = await pdf.embedFont(StandardFonts.Helvetica);
-      for (let pageNo = 1; pageNo <= 3; pageNo += 1) {
+      for (let pageNo = 1; pageNo <= 8; pageNo += 1) {
         const page = pdf.addPage([612, 792]);
         page.drawText(`NORTH RIDGE PROJECT - DISCLOSURE EXHIBIT`, { x: 54, y: 728, size: 14, font, color: rgb(0.12, 0.16, 0.2) });
-        page.drawText(`Document page ${pageNo} / 3`, { x: 54, y: 704, size: 10, font, color: rgb(0.35, 0.39, 0.43) });
+        page.drawText(`Document page ${pageNo} / 8`, { x: 54, y: 704, size: 10, font, color: rgb(0.35, 0.39, 0.43) });
         page.drawLine({ start: { x: 54, y: 690 }, end: { x: 558, y: 690 }, thickness: 1, color: rgb(0.75, 0.78, 0.8) });
         const lines = [
           'Commercial terms and operational records',
@@ -198,11 +203,12 @@ function useDemoPdf() {
   return bytes;
 }
 
-function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number; redacted?: boolean; onDraw?: (region: { x: number; y: number; width: number; height: number }) => void }) {
+function PdfPage({ pageNumber, rotation = 0, crop = FULL_CROP, redacted = false, onDraw }: { pageNumber: number; rotation?: 0 | 90 | 180 | 270; crop?: { x: number; y: number; width: number; height: number }; redacted?: boolean; onDraw?: (region: { x: number; y: number; width: number; height: number }) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bytes = useDemoPdf();
   const [drawing, setDrawing] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const start = useRef({ x: 0, y: 0 });
+  const [aspect, setAspect] = useState(792 / 612);
   useEffect(() => {
     if (!bytes || !canvasRef.current) return;
     let task: ReturnType<typeof pdfjs.getDocument> | null = null;
@@ -210,20 +216,19 @@ function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number;
       task = pdfjs.getDocument({ data: bytes.slice(0) });
       const pdf = await task.promise;
       const page = await pdf.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 1.25 });
+      const viewport = page.getViewport({ scale: 1.25, rotation });
       const canvas = canvasRef.current!;
       const ratio = window.devicePixelRatio || 1;
       canvas.width = viewport.width * ratio;
       canvas.height = viewport.height * ratio;
-      canvas.style.width = '100%';
-      canvas.style.aspectRatio = `${viewport.width}/${viewport.height}`;
       const context = canvas.getContext('2d')!;
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       await page.render({ canvas, canvasContext: context, viewport }).promise;
+      setAspect((viewport.width * crop.width) / (viewport.height * crop.height));
     };
     render().catch(console.error);
     return () => { task?.destroy(); };
-  }, [bytes, pageNumber]);
+  }, [bytes, pageNumber, rotation, crop.x, crop.y, crop.width, crop.height]);
 
   const pointerDown = (event: React.PointerEvent) => {
     if (!onDraw) return;
@@ -245,8 +250,15 @@ function PdfPage({ pageNumber, redacted = false, onDraw }: { pageNumber: number;
     setDrawing(null);
   };
   return (
-    <div className={`pdf-page ${onDraw ? 'drawable' : ''}`} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}>
-      <canvas ref={canvasRef} />
+    <div className={`pdf-page ${onDraw ? 'drawable' : ''}`} style={{ aspectRatio: `${aspect}` }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}>
+      <div className="pdf-crop-window">
+        <canvas ref={canvasRef} style={{
+          left: `${(-crop.x / crop.width) * 100}%`,
+          top: `${(-crop.y / crop.height) * 100}%`,
+          width: `${(1 / crop.width) * 100}%`,
+          height: `${(1 / crop.height) * 100}%`
+        }} />
+      </div>
       {redacted && <div className="page-redaction-demo"><span>已发布区域掩码</span></div>}
       {drawing && <i className="drawing-region" style={{ left: `${drawing.x * 100}%`, top: `${drawing.y * 100}%`, width: `${drawing.width * 100}%`, height: `${drawing.height * 100}%` }} />}
     </div>
@@ -259,11 +271,41 @@ function ReviewPage() {
   const { documents, activePage, redactionMode, activeRedactionId } = useDisclosureStore();
   const store = useDisclosureStore();
   const doc = documents.find((item) => item.id === documentId) ?? documents[0];
-  const pageRegions = doc.redactions.filter((item) => item.page === activePage);
+  const pageGeometry = doc.pageList[activePage - 1];
+  const pageRegions = doc.redactions.filter((item) => item.page === activePage && !item.quarantined);
   const active = doc.redactions.find((item) => item.id === activeRedactionId);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [reason, setReason] = useState('商业秘密');
-  const [privilege, setPrivilege] = useState('合同保密');
+  const [reason] = useState('商业秘密');
+  const [privilege] = useState('合同保密');
+  const [importResult, setImportResult] = useState<BatchRecord | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [quarantineOpen, setQuarantineOpen] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const handleImportFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const result = store.importPackage(JSON.parse(text));
+      setImportResult(result);
+    } catch (error) {
+      setImportResult({
+        batchId: file.name,
+        receivedAt: new Date().toISOString(),
+        status: 'failed',
+        appliedRegions: 0,
+        pendingRegions: 0,
+        quarantinedRegions: 0,
+        recoveredPages: [],
+        failedPages: [],
+        messages: [`标注包解析失败：${(error as Error).message}`]
+      });
+    }
+  };
+
+  const pendingCount = doc.redactions.filter((r) => r.status === 'pending' && !r.quarantined).length;
+  const confirmedCount = doc.redactions.filter((r) => r.status === 'confirmed' && !r.quarantined).length;
+  const quarantinedCount = doc.quarantine.length;
+
   return (
     <div className="page review-page">
       <header className="review-header">
@@ -271,33 +313,79 @@ function ReviewPage() {
           <Button variant="ghost" onClick={() => navigate({ to: '/' })}><ArrowLeft size={16} /></Button>
           <div><small>{doc.id} / 去密审阅</small><h1>{doc.title}</h1></div>
           <Badge tone={doc.classification === '严格机密' ? 'red' : 'amber'}>{doc.classification}</Badge>
+          {pendingCount > 0 && <Badge tone="amber">{pendingCount} 项待复核</Badge>}
+          {quarantinedCount > 0 && <Badge tone="red">{quarantinedCount} 项已隔离</Badge>}
         </div>
         <div className="review-actions">
           <Button variant="outline" onClick={() => store.toggleRedactionMode()} className={redactionMode ? 'active-button' : ''}><Highlighter size={16} /> {redactionMode ? '取消绘制' : '绘制去密区'}</Button>
+          <Button variant="outline" onClick={() => store.exportPackage()}><UploadCloud size={16} /> 导出标注包</Button>
+          <Button variant="outline" onClick={() => fileInput.current?.click()}><UploadCloud size={16} /> 导入标注包</Button>
+          <Button variant="outline" onClick={() => setImportResult(store.importDemoPackage())}><Copy size={16} /> 模拟外聘回传</Button>
+          <Button variant="outline" onClick={() => setHistoryOpen(true)}><History size={16} /> 复核记录</Button>
+          <Button variant="outline" onClick={() => setQuarantineOpen(true)}>隔离区 {quarantinedCount > 0 && <Badge tone="red">{quarantinedCount}</Badge>}</Button>
           <Button variant="outline" onClick={() => setDialogOpen(true)}><FileCheck2 size={16} /> 发布前校验</Button>
           <Button><Check size={16} /> 提交质检</Button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: 'none' }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void handleImportFile(file);
+              event.target.value = '';
+            }}
+          />
         </div>
       </header>
       <div className="review-layout">
         <aside className="page-thumbs">
           <div className="side-label">页级预览 <span>{doc.pages} 页</span></div>
-          {[1, 2, 3].map((page) => (
-            <button key={page} className={activePage === page ? 'active' : ''} onClick={() => store.setPage(page)}>
-              <div className="mini-page"><span>{page}</span><i style={{ width: `${45 + page * 9}%` }} /><i style={{ width: `${70 - page * 5}%` }} /><i style={{ width: `${55 + page * 4}%` }} /></div>
-              <small>第 {page} 页</small>
-            </button>
-          ))}
+          {doc.pageList.map((page) => {
+            const pageNo = doc.pageList.findIndex((p) => p.pageId === page.pageId) + 1;
+            const pagePending = doc.redactions.filter((r) => r.pageId === page.pageId && r.status === 'pending' && !r.quarantined).length;
+            return (
+              <button key={page.pageId} className={activePage === pageNo ? 'active' : ''} onClick={() => store.setPage(pageNo)}>
+                <div className="mini-page"><span>{page.rotation}°</span><i style={{ width: `${45 + pageNo * 9}%` }} /><i style={{ width: `${70 - pageNo * 5}%` }} /><i style={{ width: `${55 + pageNo * 4}%` }} /></div>
+                <small>第 {pageNo} 页 {page.rotation !== 0 && `· 旋转 ${page.rotation}°`} {pagePending > 0 && <em className="thumb-pending">{pagePending} 待复核</em>}</small>
+              </button>
+            );
+          })}
+          <Button variant="outline" className="add-page-btn" onClick={() => store.addPage()}><Plus size={14} /> 增加页</Button>
         </aside>
         <section className="viewer-column">
           <div className="viewer-toolbar">
             <div><button onClick={() => store.setPage(Math.max(1, activePage - 1))} disabled={activePage === 1}><ChevronLeft size={16} /></button><strong>{activePage} / {doc.pages}</strong><button onClick={() => store.setPage(Math.min(doc.pages, activePage + 1))} disabled={activePage === doc.pages}><ChevronRight size={16} /></button></div>
-            <span>125%</span>
-            <span>原页 · 掩码叠加</span>
+            <div className="geometry-tools">
+              <RotateCw size={14} />
+              {([0, 90, 180, 270] as const).map((r) => (
+                <button key={r} className={pageGeometry.rotation === r ? 'active' : ''} onClick={() => store.setPageGeometry(pageGeometry.pageId, { rotation: r })}>{r}°</button>
+              ))}
+              <Scissors size={14} />
+              <select
+                value={pageGeometry.crop.width === 1 ? 'full' : String(pageGeometry.crop.width)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  const crop = value === 'full' ? { ...FULL_CROP } : { x: (1 - Number(value)) / 2, y: (1 - Number(value)) / 2, width: Number(value), height: Number(value) };
+                  store.setPageGeometry(pageGeometry.pageId, { crop });
+                }}
+              >
+                <option value="full">全页</option>
+                <option value="0.9">裁边 5%</option>
+                <option value="0.8">裁边 10%</option>
+                <option value="0.7">裁边 15%</option>
+              </select>
+              <button className="remove-page-btn" onClick={() => store.removePage(pageGeometry.pageId)} disabled={doc.pageList.length <= 1}><Trash2 size={14} /> 移除本页</button>
+            </div>
+            <span>125% · 原页 · 掩码叠加</span>
           </div>
           <div className="pdf-stage">
             <PdfPage
-              pageNumber={activePage}
-              onDraw={redactionMode ? (region) => store.addRedaction({ ...region, page: activePage, reason, privilege }) : undefined}
+              key={`${pageGeometry.pageId}-${pageGeometry.rotation}-${pageGeometry.crop.x}-${pageGeometry.crop.y}-${pageGeometry.crop.width}-${pageGeometry.crop.height}`}
+              pageNumber={pageGeometry.pdfPage}
+              rotation={pageGeometry.rotation}
+              crop={pageGeometry.crop}
+              onDraw={redactionMode ? (region) => store.addRedaction({ ...region, reason, privilege }) : undefined}
             />
             {pageRegions.map((region) => (
               <button
@@ -305,26 +393,33 @@ function ReviewPage() {
                 className={`redaction-region ${region.status} ${activeRedactionId === region.id ? 'selected' : ''}`}
                 style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }}
                 onClick={() => store.selectRedaction(region.id)}
-                title={`${region.reason} / ${region.privilege}`}
+                title={`${region.reason} / ${region.privilege} / ${region.sourceBatchId}`}
               />
             ))}
           </div>
         </section>
         <aside className="inspector">
-          <div className="side-label">区域属性</div>
-          {active ? (
+          <div className="side-label">区域属性（可迁移标注）</div>
+          {active && !active.quarantined ? (
             <>
-              <div className="inspector-title"><strong>{active.reason}</strong><Badge tone={active.status === 'confirmed' ? 'green' : 'amber'}>{active.status === 'confirmed' ? '已确认' : '草稿'}</Badge></div>
+              <div className="inspector-title"><strong>{active.reason}</strong><Badge tone={active.status === 'confirmed' ? 'green' : active.status === 'pending' ? 'amber' : 'neutral'}>{active.status === 'confirmed' ? '已确认' : active.status === 'pending' ? '待复核' : '草稿'}</Badge></div>
+              {active.status === 'pending' && <p className="pending-note"><AlertTriangle size={13} /> 页面几何已变化，原复核失效，请核对后重新确认。</p>}
               <label>保密级别<select value={doc.classification} onChange={(event) => store.updateClassification(event.target.value as DisclosureRecord['classification'])}><option>内部</option><option>机密</option><option>严格机密</option></select></label>
+              <div className="annotation-meta">
+                <div><span>页号</span><b>第 {active.page} 页</b></div>
+                <div><span>旋转角</span><b>{active.rotation}°</b></div>
+                <div><span>裁边</span><b>{active.crop.width === 1 ? '全页' : `${Math.round((1 - active.crop.width) * 100)}%`}</b></div>
+                <div><span>来源批次</span><b>{active.sourceBatchId}</b></div>
+              </div>
               <label>去密原因<input value={active.reason} readOnly /></label>
               <label>特权标签<input value={active.privilege} readOnly /></label>
               <label>责任人员<input value={doc.owner} readOnly /></label>
               <div className="coordinate-grid"><div><span>X</span><b>{Math.round(active.x * 100)}%</b></div><div><span>Y</span><b>{Math.round(active.y * 100)}%</b></div><div><span>宽</span><b>{Math.round(active.width * 100)}%</b></div><div><span>高</span><b>{Math.round(active.height * 100)}%</b></div></div>
-              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed'}><Check size={15} /> 确认此区域</Button>
+              <Button onClick={() => store.confirmRedaction(active.id)} disabled={active.status === 'confirmed'}><Check size={15} /> {active.status === 'pending' ? '重新确认' : '确认此区域'}</Button>
               <Button variant="outline"><Copy size={15} /> 批量复制到同类页</Button>
             </>
-          ) : <p className="muted">在文档页面上选择一个去密区域查看属性。</p>}
-          <div className="rule-note"><AlertTriangle size={16} /><span>发布版本不得包含原始文本层或图片残片。</span></div>
+          ) : <p className="muted">在文档页面上选择一个去密区域查看属性；区域记录页号、旋转角、归一化坐标与来源批次。</p>}
+          <div className="rule-note"><AlertTriangle size={16} /><span>发布版本不得包含原始文本层或图片残片；旋转或裁边变化后原复核自动失效。</span></div>
         </aside>
       </div>
       <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -336,9 +431,73 @@ function ReviewPage() {
             <div className="dialog-checks">
               <p><Check /> {doc.redactions.length} 个去密区域已定位</p>
               <p><Check /> 文档版本与操作者记录完整</p>
-              <p className={doc.redactions.some((item) => item.status === 'draft') ? 'failed' : ''}><AlertTriangle /> {doc.redactions.some((item) => item.status === 'draft') ? '仍有未确认区域' : '所有区域已确认'}</p>
+              <p className={pendingCount > 0 || quarantinedCount > 0 ? 'failed' : ''}><AlertTriangle /> {pendingCount > 0 ? `${pendingCount} 项待复核` : quarantinedCount > 0 ? `${quarantinedCount} 项已隔离` : '所有区域已确认'}</p>
             </div>
             <Dialog.Close asChild><Button>返回检查 <X size={15} /></Button></Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={importResult !== null} onOpenChange={(open) => !open && setImportResult(null)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title>标注包导入结果</Dialog.Title>
+            <Dialog.Description>批次 {importResult?.batchId} · {importResult?.receivedAt ? new Date(importResult.receivedAt).toLocaleTimeString('zh-CN') : ''}</Dialog.Description>
+            {importResult && (
+              <div className="dialog-checks">
+                <p className={importResult.status === 'conflict' || importResult.status === 'failed' ? 'failed' : ''}>
+                  <AlertTriangle /> 状态：{importResult.status === 'applied' ? '已生效' : importResult.status === 'partial' ? '部分生效（已从完成页恢复）' : importResult.status === 'duplicate' ? '同批复传，沿用第一次结果' : importResult.status === 'conflict' ? '批次冲突，内容已留档' : '合并失败'}
+                </p>
+                <p><Check /> 生效区域 {importResult.appliedRegions} 个</p>
+                <p className={importResult.pendingRegions > 0 ? 'failed' : ''}><AlertTriangle /> 转待复核 {importResult.pendingRegions} 个</p>
+                <p className={importResult.quarantinedRegions > 0 ? 'failed' : ''}><AlertTriangle /> 隔离 {importResult.quarantinedRegions} 个</p>
+                {importResult.recoveredPages.length > 0 && <p><Check /> 已恢复页：第 {importResult.recoveredPages.join('、')} 页</p>}
+                {importResult.failedPages.length > 0 && <p className="failed"><AlertTriangle /> 失败页：第 {importResult.failedPages.join('、')} 页</p>}
+                {importResult.messages.map((message, index) => <p key={index} className="failed">{message}</p>)}
+              </div>
+            )}
+            <Dialog.Close asChild><Button>知道了 <X size={15} /></Button></Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content wide">
+            <Dialog.Title>复核记录</Dialog.Title>
+            <Dialog.Description>原确认记录长期可查；几何变化后原复核失效并保留在此。</Dialog.Description>
+            <div className="history-list">
+              {doc.conclusionHistory.length === 0 && <p className="muted">暂无复核记录。</p>}
+              {doc.conclusionHistory.slice().reverse().map((c) => (
+                <div className="history-row" key={c.id}>
+                  <Badge tone="green">已确认</Badge>
+                  <div><strong>{c.redactionId}</strong><span>第 {c.page} 页 · 批次 {c.batchId} · {c.reviewer}</span></div>
+                  <small>{new Date(c.at).toLocaleString('zh-CN')}</small>
+                  {c.note && <em>{c.note}</em>}
+                </div>
+              ))}
+            </div>
+            <Dialog.Close asChild><Button>关闭 <X size={15} /></Button></Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={quarantineOpen} onOpenChange={setQuarantineOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content wide">
+            <Dialog.Title>隔离区</Dialog.Title>
+            <Dialog.Description>落不到当前页面的区域单独留存，不会落到别的页。</Dialog.Description>
+            <div className="history-list">
+              {doc.quarantine.length === 0 && <p className="muted">隔离区为空。</p>}
+              {doc.quarantine.map((q) => (
+                <div className="history-row" key={q.id}>
+                  <Badge tone="red">已隔离</Badge>
+                  <div><strong>{q.quarantineReason}</strong><span>原第 {q.page} 页 · 批次 {q.sourceBatchId} · {q.reason} / {q.privilege}</span></div>
+                  <small>{new Date(q.quarantinedAt).toLocaleString('zh-CN')}</small>
+                </div>
+              ))}
+            </div>
+            <Dialog.Close asChild><Button>关闭 <X size={15} /></Button></Dialog.Close>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

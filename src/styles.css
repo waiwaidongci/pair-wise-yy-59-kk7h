@@ -113,9 +113,12 @@ button { cursor: pointer; }
 .pdf-stage { position: relative; overflow: auto; flex: 1; padding: 28px; display: flex; justify-content: center; align-items: flex-start; }
 .pdf-page { position: relative; width: min(750px, calc(100vw - 460px)); flex: none; background: white; box-shadow: 0 8px 28px rgba(32,43,53,.18); overflow: hidden; touch-action: none; }
 .pdf-page canvas { width: 100%; display: block; }
+.pdf-crop-window { position: absolute; inset: 0; overflow: hidden; background: white; }
+.pdf-crop-window canvas { position: absolute; display: block; }
 .pdf-page.drawable { cursor: crosshair; }
 .pdf-stage > .redaction-region { position: absolute; z-index: 5; background: rgba(17,24,31,.88); border: 1px solid #ffc25a; }
 .pdf-stage > .redaction-region.draft { background: rgba(180,58,58,.55); border: 1px dashed #ffd1d1; }
+.pdf-stage > .redaction-region.pending { background: rgba(165,104,23,.45); border: 1px solid #f0b429; }
 .pdf-stage > .redaction-region.selected { outline: 2px solid #2e6be6; outline-offset: 2px; }
 .drawing-region { position: absolute; background: rgba(40,100,220,.35); border: 1px dashed #183f92; }
 .inspector { background: #fafbfc; border-left: 1px solid var(--line); padding: 16px; }
@@ -185,6 +188,28 @@ button { cursor: pointer; }
 .batch-summary dd { margin: 0; font-weight: 700; font-size: 12px; }
 .summary-note { display: flex; gap: 7px; color: #8d5816; font-size: 11px; padding: 11px; background: #fff5e4; border-radius: 4px; margin-top: 14px; }
 .muted { color: #79858f; font-size: 12px; }
+
+.geometry-tools { display: flex; align-items: center; gap: 6px; color: #67737d; }
+.geometry-tools button { border: 1px solid #cfd6dc; background: white; border-radius: 4px; padding: 2px 7px; font-size: 10px; color: #53606b; }
+.geometry-tools button.active { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); font-weight: 700; }
+.geometry-tools select { border: 1px solid #cfd6dc; border-radius: 4px; background: white; font-size: 10px; padding: 2px 4px; color: #53606b; }
+.geometry-tools .remove-page-btn { color: var(--red); border-color: #e6c4c4; }
+.thumb-pending { display: inline-block; margin-left: 6px; color: var(--amber); font-style: normal; font-weight: 700; }
+.add-page-btn { width: 100%; margin-top: 10px; font-size: 11px; }
+.annotation-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
+.annotation-meta div { background: #eef1f3; padding: 7px 8px; border-radius: 4px; }
+.annotation-meta span, .annotation-meta b { display: block; font-size: 10px; }
+.annotation-meta span { color: #77828b; }
+.annotation-meta b { margin-top: 3px; font-size: 11px; word-break: break-all; }
+.pending-note { display: flex; gap: 6px; align-items: flex-start; color: #8d5816; background: #fff5e4; border: 1px solid #f1d8af; font-size: 11px; line-height: 1.45; padding: 9px; border-radius: 5px; margin: 0 0 12px; }
+.dialog-content.wide { width: min(560px, calc(100vw - 30px)); }
+.history-list { border-top: 1px solid var(--line); margin: 12px 0; max-height: 320px; overflow: auto; }
+.history-row { display: flex; align-items: center; gap: 10px; padding: 10px 2px; border-bottom: 1px solid #edf0f2; }
+.history-row > div { min-width: 0; }
+.history-row strong, .history-row span { display: block; font-size: 11px; }
+.history-row span { color: #7a858e; font-size: 10px; margin-top: 2px; }
+.history-row small { margin-left: auto; color: #8a949d; font-size: 10px; white-space: nowrap; }
+.history-row em { font-size: 10px; color: #8d5816; font-style: normal; }
 
 @media (max-width: 1100px) {
   .document-row { grid-template-columns: 38px minmax(200px, 1fr) 88px 80px 72px; }
